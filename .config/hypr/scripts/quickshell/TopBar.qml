@@ -128,6 +128,9 @@ Variants {
             property string batIcon: "󰁹"
             property string batStatus: "Unknown"
             
+            property string updateManager: "arch-update"
+            property string updatesCount: "0"
+
             property string kbLayout: "us"
             
             ListModel { id: workspacesModel }
@@ -142,6 +145,15 @@ Variants {
             property bool isSoundActive: !barWindow.isMuted && parseInt(barWindow.volPercent) > 0
             property int batCap: parseInt(barWindow.batPercent) || 0
             property bool isCharging: barWindow.batStatus === "Charging" || barWindow.batStatus === "Full"
+
+            property color updatesDynamicColor: {
+                let n = parseInt(updatesCount) || 0;
+                if (updatesCount >= 150) return mocha.red;
+                if (updatesCount >= 100) return mocha.yellow;
+                if (updatesCount >= 50) return mocha.peach;
+                return mocha.blue;
+            }
+
             property color batDynamicColor: {
                 if (isCharging) return mocha.green;
                 if (batCap >= 70) return mocha.blue;
@@ -315,6 +327,62 @@ Variants {
                 }
             }
             Timer { interval: 150000; running: true; repeat: true; triggeredOnStart: true; onTriggered: weatherPoller.running = true }
+
+            Process {
+                id: updateManagerPoller
+                running: true
+                command: ["bash", "-c", "cat /etc/os-release"]
+                stdout: StdioCollector {
+                    onStreamFinished: {
+                        if (this.text.trim().includes('CachyOS')) {
+                            updateManager = "cachy-update"
+                        }
+                    }
+                }
+            }
+
+            Process {
+                id: updatesPoller
+                command: ["bash", "-c", '
+                    while [ -f /var/lib/pacman/db.lck ]; do sleep 1; done
+                    [ -x "$(command -v yay)" ] && aur=$(yay -Qum 2>/dev/null | wc -l) || aur=0
+                    pac=$(checkupdates 2>/dev/null | wc -l)
+                    updates=$((pac + aur))
+                    echo ${updates:-0} > /tmp/qs_updates
+                ']
+            }
+            Timer {
+                interval: 150000
+                running: true
+                repeat: true
+                triggeredOnStart: true
+                onTriggered: {
+                    // Only run on primary monitor since runnning two instances of this can cause issues
+                    if (modelData === Quickshell.screens[0])
+                        updatesPoller.running = true
+                }
+            }
+
+            Process {
+                id: updatesReader
+                command: ["cat", "/tmp/qs_updates"]
+                stdout: StdioCollector {
+                    onStreamFinished: {
+                        let v = this.text.trim()
+                        if (v !== "") updatesCount = v
+                    }
+                }
+            }
+
+            Process {
+                id: updatesWatcher
+                running: true
+                command: ["bash", "-c", "inotifywait -qq -e close_write,modify /tmp/qs_updates"]
+                onExited: {
+                    updatesReader.running = true
+                    running = true
+                }
+            }
 
             // Native Qt Time Formatting
             Timer {
@@ -879,6 +947,56 @@ Variants {
                             spacing: barWindow.s(8) 
 
                             property int pillHeight: barWindow.s(34)
+
+                            // Updates
+                            Rectangle {
+                                visible: barWindow.updatesCount > 0
+                                property bool isHovered: updatesMouse.containsMouse
+                                color: isHovered ? Qt.rgba(mocha.surface1.r, mocha.surface1.g, mocha.surface1.b, 0.6) : Qt.rgba(mocha.surface0.r, mocha.surface0.g, mocha.surface0.b, 0.4)
+                                radius: barWindow.s(10); height: sysLayout.pillHeight;
+                                clip: true
+
+                                Rectangle {
+                                    anchors.fill: parent
+                                    radius: barWindow.s(10)
+                                    Behavior on opacity { NumberAnimation { duration: 300 } }
+                                    gradient: Gradient {
+                                        orientation: Gradient.Horizontal
+                                        GradientStop { position: 0.0; color: updatesDynamicColor }
+                                        GradientStop { position: 1.0; color: Qt.lighter(updatesDynamicColor, 1.3) }
+                                    }
+                                }
+                                
+                                property real targetWidth: updatesLayoutRow.width + barWindow.s(24)
+                                width: targetWidth
+                                Behavior on width { NumberAnimation { duration: 500; easing.type: Easing.OutQuint } }
+                                
+                                scale: isHovered ? 1.05 : 1.0
+                                Behavior on scale { NumberAnimation { duration: 250; easing.type: Easing.OutExpo } }
+                                Behavior on color { ColorAnimation { duration: 200 } }
+
+                                property bool initAnimTrigger: false
+                                Timer { running: rightLayout.showLayout && !parent.initAnimTrigger; interval: 150; onTriggered: parent.initAnimTrigger = true }
+                                opacity: initAnimTrigger ? 1 : 0
+                                transform: Translate { y: parent.initAnimTrigger ? 0 : barWindow.s(15); Behavior on y { NumberAnimation { duration: 500; easing.type: Easing.OutBack } } }
+                                Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+
+                                Row { 
+                                    id: updatesLayoutRow; anchors.centerIn: parent; spacing: barWindow.s(8)
+                                    Text { 
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: "󰏖"; font.family: "Iosevka Nerd Font"; font.pixelSize: barWindow.s(16); 
+                                        color: mocha.base
+                                    }
+                                    Text { 
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: barWindow.updatesCount; 
+                                        font.family: "JetBrains Mono"; font.pixelSize: barWindow.s(13); font.weight: Font.Black; 
+                                        color: mocha.base
+                                    }
+                                }
+                                MouseArea { id: updatesMouse; hoverEnabled: true; anchors.fill: parent; onClicked: Quickshell.execDetached(["kitty", "-e", barWindow.updateManager]) }
+                            }
 
                             // KB
                             Rectangle {
