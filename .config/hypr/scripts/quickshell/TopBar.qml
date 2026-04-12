@@ -149,7 +149,7 @@ Variants {
             property color updatesDynamicColor: {
                 let n = parseInt(updatesCount) || 0;
                 if (updatesCount >= 150) return mocha.red;
-                if (updatesCount >= 100) return mocha.yellow;
+                if (updatesCount >= 100) return "#e6d08a";
                 if (updatesCount >= 50) return mocha.peach;
                 return mocha.blue;
             }
