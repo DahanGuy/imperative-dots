@@ -3,8 +3,12 @@
 # ==============================================================================
 # Script Versioning & Initialization
 # ==============================================================================
-DOTS_VERSION="1.0.24-2"
+DOTS_VERSION="1.5.1"
 VERSION_FILE="$HOME/.local/state/imperative-dots-version"
+
+# Prevent the TTY/Console from falling asleep (black screen) during long package builds
+setterm -blank 0 -powerdown 0 2>/dev/null || true
+printf '\033[9;0]' 2>/dev/null || true
 
 # Global Variables & Initial States (Defaults)
 WALLPAPER_DIR="$(xdg-user-dir PICTURES 2>/dev/null || echo "$HOME/Pictures")/Wallpapers"
@@ -12,6 +16,12 @@ WEATHER_API_KEY=""
 WEATHER_CITY_ID=""
 WEATHER_UNIT=""
 FAILED_PKGS=()
+
+# Optional Component States
+OPT_SDDM=false
+OPT_NVIM=false
+OPT_ZSH=false
+OPT_WALLPAPERS=false
 
 INSTALL_NVIM=false
 INSTALL_ZSH=false
@@ -42,25 +52,24 @@ KB_OPTIONS="grp:alt_shift_toggle"
 mkdir -p "$(dirname "$VERSION_FILE")"
 
 # Load previous choices if the file exists
-if [ -f "$VERSION_FILE" ]; then
+if [ -f "$VERSION_FILE" ] && [ -s "$VERSION_FILE" ]; then
     source "$VERSION_FILE"
-    if [ -n "$LOCAL_VERSION" ]; then
-        if [ -n "$KB_LAYOUTS" ]; then VISITED_KEYBOARD=true; fi
-        if [ -n "$WEATHER_API_KEY" ]; then VISITED_WEATHER=true; fi
-        if [ "$DRIVER_CHOICE" != "None (Skipped)" ] && [ -n "$DRIVER_CHOICE" ]; then VISITED_DRIVERS=true; fi
+    if [ -n "$LOCAL_VERSION" ] && [ "$LOCAL_VERSION" != "Not Installed" ]; then
+        [ -n "$KB_LAYOUTS" ] && VISITED_KEYBOARD=true
+        [ -n "$WEATHER_API_KEY" ] && VISITED_WEATHER=true
+        [[ "$DRIVER_CHOICE" != "None (Skipped)" && -n "$DRIVER_CHOICE" ]] && VISITED_DRIVERS=true
     fi
 else
     LOCAL_VERSION="Not Installed"
 fi
 
-# Generate an anonymous ID for telemetry if it doesn't exist yet
+# Generate Telemetry ID
 if [ -z "$TELEMETRY_ID" ]; then
     if command -v uuidgen &> /dev/null; then
         TELEMETRY_ID=$(uuidgen)
     else
         TELEMETRY_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || head -c 16 /dev/urandom | od -An -t x | tr -d ' ')
     fi
-    # Save it immediately so early exits don't generate a new ID every time
     echo "TELEMETRY_ID=\"$TELEMETRY_ID\"" >> "$VERSION_FILE"
 fi
 
@@ -81,7 +90,7 @@ C_MAGENTA="\e[35m"
 # Package Arrays
 # ==============================================================================
 ARCH_PKGS=(
-    "hyprland" "weston" "kitty" "cava" "rofi-wayland" "swaync" 
+    "hyprland" "hypridle" "kitty" "wl-screenrec-git" "cava" "zbar" "rofi-wayland" 
     "pavucontrol" "alsa-utils" "awww" "networkmanager-dmenu-git"
     "wl-clipboard" "fd" "qt6-multimedia" "qt6-5compat" "ripgrep"
     "cliphist" "jq" "socat" "inotify-tools" "pamixer" "brightnessctl" "acpi" "iw"
@@ -90,8 +99,7 @@ ARCH_PKGS=(
     "imagemagick" "wget" "file" "git" "psmisc"
     "matugen-bin" "ffmpeg" "fastfetch" "quickshell-git" "unzip" "python-websockets" "qt6-websockets"
     "grim" "playerctl" "satty" "yq" "xdg-desktop-portal-gtk" "slurp" "mpvpaper"
-    "wmctrl" "power-profiles-daemon" "easyeffects" "swayosd-git" "nautilus" "lsp-plugins"
-    # SDDM / Qt Dependencies to prevent greeter crashes on Wayland
+    "wmctrl" "power-profiles-daemon" "easyeffects" "swayosd-git" "nautilus" "lsp-plugins" "hyprpolkitagent"
     "qt5-wayland" "qt5-quickcontrols" "qt5-quickcontrols2" "qt5-graphicaleffects" "qt6-wayland"
 )
 
@@ -146,6 +154,11 @@ case $OS in
         else
             PKG_MANAGER="sudo pacman -S --noconfirm --needed"
         fi
+        ;;
+    fedora)
+        echo -e "${C_RED}Unsupported OS ($OS). This script strictly supports Arch Linux and its derivatives.${RESET}"
+        echo -e "${C_YELLOW}Fedora install scripts coming soon.${RESET}"
+        exit 1
         ;;
     *)
         echo -e "${C_RED}Unsupported OS ($OS). This script strictly supports Arch Linux and its derivatives.${RESET}"
@@ -221,6 +234,25 @@ EOF
 EOF
 )
             curl -X POST -H "Content-Type: application/json" -d "$payload" "$WORKER_URL" -s -o /dev/null &
+
+        # Mode 3: Installation Completed
+        elif [[ "$mode" == "done" ]]; then
+            local failed_str=""
+            if [[ "$ENABLE_TELEMETRY" == true && ${#FAILED_PKGS[@]} -gt 0 ]]; then
+                failed_str="${FAILED_PKGS[*]}"
+            fi
+            
+            local payload=$(cat <<EOF
+{
+  "type": "done",
+  "version": "${DOTS_VERSION}",
+  "id": "${TELEMETRY_ID}",
+  "telemetry_enabled": ${ENABLE_TELEMETRY},
+  "failed_packages": "${failed_str//\"/\\\"}"
+}
+EOF
+)
+            curl -X POST -H "Content-Type: application/json" -d "$payload" "$WORKER_URL" -s -o /dev/null &
         fi
     fi
 }
@@ -249,11 +281,13 @@ EOF
     local OSC8_GH="\e]8;;https://github.com/ilyamiro/imperative-dots.git\a"
     local OSC8_TW="\e]8;;https://twitter.com/ilyamirox\a"
     local OSC8_RD="\e]8;;https://reddit.com/r/ilyamiro1\a"
+    local OSC8_KF="\e]8;;https://ko-fi.com/ilyamiro\a"
     local OSC8_END="\e]8;;\a"
 
     printf "\033[K${C_BLUE} -----------------------------------------------------------------${RESET}\n"
     printf "\033[K${BOLD}${C_GREEN} GitHub:${RESET}  ${OSC8_GH}https://github.com/ilyamiro/imperative-dots.git${OSC8_END}\n"
     printf "\033[K${BOLD}${C_CYAN} Twitter:${RESET} ${OSC8_TW}@ilyamirox${OSC8_END}  |  ${BOLD}${C_RED}Reddit:${RESET} ${OSC8_RD}r/ilyamiro1${OSC8_END}\n"
+    printf "\033[K${BOLD}${C_MAGENTA} Donate:${RESET}  ${OSC8_KF}Donate on Ko-fi (Help the project!)${OSC8_END}\n"
     printf "\033[K${C_BLUE} -----------------------------------------------------------------${RESET}\n"
     printf "\033[K${BOLD} User:           ${RESET} %s\n" "$USER_NAME"
     printf "\033[K${BOLD} OS:             ${RESET} %s\n" "$OS_NAME"
@@ -423,7 +457,7 @@ manage_drivers() {
 
 manage_keyboard() {
     local available_layouts=(
-        "us - English (US)" "gb - English (UK)" "au - English (Australia)"
+        "gb - English (UK)" "au - English (Australia)"
         "ca - English/French (Canada)" "ie - English (Ireland)"
         "nz - English (New Zealand)" "za - English (South Africa)"
         "fr - French" "be - Belgian" "ch - Swiss"
@@ -449,15 +483,15 @@ manage_keyboard() {
         "latam - Spanish (Latin America)"
         "al - Albanian" "fo - Faroese"
     )
-    local selected_codes=()
-    local selected_names=()
+    local selected_codes=("us")
+    local selected_names=("English (US)")
 
     while true; do
         draw_header
         echo -e "${BOLD}${C_CYAN}=== Keyboard Layout Configuration ===${RESET}\n"
 
         if [ ${#selected_codes[@]} -gt 0 ]; then
-            echo -e "Currently added: ${C_GREEN}$(IFS=', '; echo "${selected_names[*]}")${RESET}\n"
+            echo -e "Currently added (US is mandatory): ${C_GREEN}$(IFS=', '; echo "${selected_names[*]}")${RESET}\n"
         fi
 
         local choice
@@ -471,11 +505,6 @@ manage_keyboard() {
             --header=" Select a language to add, or select Done ")
 
         if [[ -z "$choice" || "$choice" == *"Done"* ]]; then
-            # Enforce at least one layout
-            if [ ${#selected_codes[@]} -eq 0 ]; then
-                selected_codes=("us")
-                selected_names=("English (US)")
-            fi
             break
         fi
 
@@ -744,13 +773,8 @@ manage_telemetry() {
     done
 }
 
-prompt_optional_features() {
-    draw_header
-    echo -e "${BOLD}${C_CYAN}=== Optional Component Setup ===${RESET}\n"
-
-    echo -e "${BOLD}1. Display Manager Integration${RESET}"
-
-    # Detect current display manager
+prompt_optional_features_menu() {
+    # Detect current display manager to set dynamic labels
     DM_SERVICES=("gdm" "gdm3" "lightdm" "sddm" "lxdm" "lxdm-gtk3" "ly")
     CURRENT_DM=""
     for dm in "${DM_SERVICES[@]}"; do
@@ -760,56 +784,77 @@ prompt_optional_features() {
         fi
     done
 
-    if [[ -z "$CURRENT_DM" ]]; then
-        read -p "No display manager detected. Do you want to install and enable SDDM? (y/N): " choice_sddm
-        if [[ "$choice_sddm" =~ ^[Yy]$ ]]; then
-            INSTALL_SDDM=true
-            SETUP_SDDM_THEME=true
-            PKGS+=("sddm")
-            echo -e "${C_GREEN}>> SDDM added to queue.${RESET}\n"
-        else
-            echo ""
-        fi
-    elif [[ "$CURRENT_DM" == "sddm" ]]; then
-        echo -e "Current session manager: ${C_YELLOW}sddm${RESET}"
-        read -p "Do you want to ADD a theme (don't remove the old ones)? (y/N): " choice_theme
-        if [[ "$choice_theme" =~ ^[Yy]$ ]]; then
-            SETUP_SDDM_THEME=true
-            echo -e "${C_GREEN}>> SDDM theme queued.${RESET}\n"
-        else
-            echo ""
-        fi
-    else
-        echo -e "Current session manager: ${C_YELLOW}${CURRENT_DM}${RESET}"
-        read -p "Do you want to replace it with SDDM? (y/N): " choice_replace
-        if [[ "$choice_replace" =~ ^[Yy]$ ]]; then
-            INSTALL_SDDM=true
-            REPLACE_DM=true
-            SETUP_SDDM_THEME=true
-            PKGS+=("sddm")
-            echo -e "${C_GREEN}>> SDDM added to queue (will replace $CURRENT_DM).${RESET}\n"
-        else
-            echo ""
-        fi
+    local DM_LABEL="Display Manager Integration (SDDM)"
+    if [[ "$CURRENT_DM" == "sddm" ]]; then
+        DM_LABEL="Configure SDDM Theme (sddm detected)"
+    elif [[ -n "$CURRENT_DM" ]]; then
+        DM_LABEL="Replace $CURRENT_DM with SDDM"
     fi
 
-    echo -e "${BOLD}2. Neovim Matugen Configuration${RESET}"
-    echo -e "${C_YELLOW}WARNING: If you use your own Neovim configuration, it will be overwritten/backed up.${RESET}"
-    read -p "Do you want to install this Neovim configuration? (y/N): " choice_nvim
-    if [[ "$choice_nvim" =~ ^[Yy]$ ]]; then
-        INSTALL_NVIM=true
-        PKGS+=("neovim" "lua-language-server" "unzip" "nodejs" "npm" "python3")
-        echo -e "${C_GREEN}>> Neovim added to queue.${RESET}\n"
-    fi
+    while true; do
+        clear
+        echo -e "${BOLD}${C_CYAN}=== Optional Component Setup ===${RESET}\n"
+        
+        # Dynamic toggle UI
+        local S_SDDM=$( [ "$OPT_SDDM" = true ] && echo -e "${C_GREEN}[x]${RESET}" || echo -e "${DIM}[ ]${RESET}" )
+        local S_NVIM=$( [ "$OPT_NVIM" = true ] && echo -e "${C_GREEN}[x]${RESET}" || echo -e "${DIM}[ ]${RESET}" )
+        local S_ZSH=$( [ "$OPT_ZSH" = true ] && echo -e "${C_GREEN}[x]${RESET}" || echo -e "${DIM}[ ]${RESET}" )
+        local S_WP=$( [ "$OPT_WALLPAPERS" = true ] && echo -e "${C_GREEN}[x]${RESET}" || echo -e "${DIM}[ ]${RESET}" )
 
-    echo -e "${BOLD}3. Zsh Shell${RESET}"
-    read -p "Do you want to install Zsh? (y/N): " choice_zsh
-    if [[ "$choice_zsh" =~ ^[Yy]$ ]]; then
-        INSTALL_ZSH=true
-        PKGS+=("zsh")
-        echo -e "${C_GREEN}>> Zsh added to queue.${RESET}\n"
-    fi
-    sleep 1.5
+        local MENU_ITEMS="1. $S_SDDM $DM_LABEL\n"
+        MENU_ITEMS+="2. $S_NVIM Neovim Matugen Configuration\n"
+        MENU_ITEMS+="3. $S_ZSH Zsh Shell Setup\n"
+        MENU_ITEMS+="4. $S_WP Download FULL Wallpaper Pack (Unchecked = 3 Random)\n"
+        MENU_ITEMS+="5. ${BOLD}${C_GREEN}Proceed with Installation / Update${RESET}\n"
+        MENU_ITEMS+="6. ${DIM}Back to Main Menu${RESET}"
+
+        local choice
+        choice=$(echo -e "$MENU_ITEMS" | fzf \
+            --ansi \
+            --layout=reverse \
+            --border=rounded \
+            --margin=1,2 \
+            --height=13 \
+            --prompt=" Options > " \
+            --pointer=">" \
+            --header=" SPACE or ENTER to toggle. Select Proceed when ready. ")
+
+        # FIXED: Added the dot and matched exactly against the list prefix
+        case "$choice" in
+            *"1."*) OPT_SDDM=$([ "$OPT_SDDM" = true ] && echo false || echo true) ;;
+            *"2."*) OPT_NVIM=$([ "$OPT_NVIM" = true ] && echo false || echo true) ;;
+            *"3."*) OPT_ZSH=$([ "$OPT_ZSH" = true ] && echo false || echo true) ;;
+            *"4."*) OPT_WALLPAPERS=$([ "$OPT_WALLPAPERS" = true ] && echo false || echo true) ;;
+            *"5."*) 
+                # Apply chosen toggles to installation logic
+                if [ "$OPT_SDDM" = true ]; then
+                    if [[ -z "$CURRENT_DM" ]]; then
+                        INSTALL_SDDM=true
+                        SETUP_SDDM_THEME=true
+                        PKGS+=("sddm")
+                    elif [[ "$CURRENT_DM" == "sddm" ]]; then
+                        SETUP_SDDM_THEME=true
+                    else
+                        INSTALL_SDDM=true
+                        REPLACE_DM=true
+                        SETUP_SDDM_THEME=true
+                        PKGS+=("sddm")
+                    fi
+                fi
+                if [ "$OPT_NVIM" = true ]; then
+                    INSTALL_NVIM=true
+                    PKGS+=("neovim" "lua-language-server" "unzip" "nodejs" "npm" "python3")
+                fi
+                if [ "$OPT_ZSH" = true ]; then
+                    INSTALL_ZSH=true
+                    PKGS+=("zsh")
+                fi
+                return 0 # Return success to start the installation process
+                ;;
+            *"6."*) return 1 ;; # Return failure code to jump back to main menu
+            *) ;;
+        esac
+    done
 }
 
 # ==============================================================================
@@ -838,6 +883,13 @@ while true; do
     elif [[ "$WEATHER_API_KEY" == "Skipped" ]]; then API_DISPLAY="Skipped"
     else API_DISPLAY="Set ($WEATHER_UNIT, ID: $WEATHER_CITY_ID)"; fi
 
+    # Determine label for the install button
+    if [ "$LOCAL_VERSION" != "Not Installed" ] && [ -n "$LOCAL_VERSION" ]; then
+        INSTALL_LABEL="UPDATE"
+    else
+        INSTALL_LABEL="START"
+    fi
+
     # Build the color-coded menu string
     MENU_ITEMS="1. $S_PKG ${C_GREEN}Manage Packages${RESET} [${#PKGS[@]} queued, Optional]\n"
     MENU_ITEMS+="2. $S_OVW ${C_CYAN}Overview & Keybinds${RESET} [Optional]\n"
@@ -845,7 +897,7 @@ while true; do
     MENU_ITEMS+="4. $S_DRV ${C_RED}[ DRIVERS ] Setup${RESET} [${DRIVER_CHOICE}, Optional]\n"
     MENU_ITEMS+="5. $S_KBD ${C_BLUE}Keyboard Layout Setup${RESET} [${KB_LAYOUTS_DISPLAY:-$KB_LAYOUTS}]\n"
     MENU_ITEMS+="6. $S_TEL ${C_CYAN}Telemetry Settings${RESET}\n"
-    MENU_ITEMS+="7. ${BOLD}${C_MAGENTA}START INSTALLATION${RESET}\n"
+    MENU_ITEMS+="7. ${BOLD}${C_MAGENTA}${INSTALL_LABEL}${RESET}\n"
     MENU_ITEMS+="8. ${DIM}Exit${RESET}"
 
     # We use --ansi flag in fzf so the color codes render properly inside the menu list
@@ -859,23 +911,27 @@ while true; do
         --pointer=">" \
         --header=" Navigate with ARROWS. Select with ENTER. ")
 
+    # FIXED: Added the dot and matched exactly against the list prefix
     case "$MENU_OPTION" in
-        *"1"*) manage_packages ;;
-        *"2"*) show_overview ;;
-        *"3"*) set_weather_api ;;
-        *"4"*) manage_drivers ;;
-        *"5"*) manage_keyboard ;;
-        *"6"*) manage_telemetry ;;
-        *"7"*) 
+        *"1."*) manage_packages ;;
+        *"2."*) show_overview ;;
+        *"3."*) set_weather_api ;;
+        *"4."*) manage_drivers ;;
+        *"5."*) manage_keyboard ;;
+        *"6."*) manage_telemetry ;;
+        *"7."*) 
             if [ "$VISITED_KEYBOARD" = false ]; then
                 echo -e "\n${C_RED}[!] You must configure your Keyboard Layouts in the submenu before starting.${RESET}"
                 sleep 2.5
                 continue
             fi
-            prompt_optional_features
-            break 
+            if prompt_optional_features_menu; then
+                break 
+            else
+                continue
+            fi
             ;;
-        *"8"*) clear; exit 0 ;;
+        *"8."*) clear; exit 0 ;;
         *) exit 0 ;;
     esac
 done
@@ -896,8 +952,12 @@ sudo -v
 
 # --- 0. Resolve Package Conflicts ---
 echo -e "\n${C_CYAN}[ INFO ]${RESET} Resolving potential package conflicts..."
-# Added 'jack', 'jack2', and 'go-yq' here to prevent installation hangs
-CONFLICTING_PKGS=("swayosd" "quickshell" "matugen" "jack" "jack2" "go-yq")
+
+# Hard-clear jack & jack2 immediately to prevent the "impossible conflict" with pipewire-jack
+echo -e "  -> Forcefully clearing 'jack' and 'jack2' for pipewire-jack..."
+sudo pacman -Rdd --noconfirm jack jack2 > /dev/null 2>&1 || true
+
+CONFLICTING_PKGS=("swayosd" "quickshell" "matugen" "go-yq")
 for cpkg in "${CONFLICTING_PKGS[@]}"; do
     if pacman -Qq | grep -qx "$cpkg"; then
         echo -e "  -> ${C_YELLOW}Removing conflicting package '$cpkg'...${RESET}"
@@ -942,9 +1002,13 @@ else
         echo -e "${C_BLUE}::${RESET} ${BOLD}Installing ${pkg}...${RESET}"
         echo -e "${C_CYAN}=================================================================${RESET}"
 
-        # Arch: Pipe 'yes ""' (Enter keystrokes) to automatically choose the default provider (1)
-        # Limit CARGO_BUILD_JOBS to prevent OOM errors during heavy Rust compilations (like swayosd)
-        if yes "" | env CARGO_BUILD_JOBS=2 $PKG_MANAGER "$pkg"; then
+        # Calculate safe thread limits (half of total cores, minimum 1, max 4)
+        SAFE_JOBS=$(( $(nproc) / 2 ))
+        [[ $SAFE_JOBS -lt 1 ]] && SAFE_JOBS=1
+        [[ $SAFE_JOBS -gt 4 ]] && SAFE_JOBS=4
+
+        # Changed from `yes ""` to `yes "Y"` to automatically accept replacements (like pipewire-jack replacements)
+        if yes "Y" | env CARGO_BUILD_JOBS="$SAFE_JOBS" MAKEFLAGS="-j$SAFE_JOBS" $PKG_MANAGER "$pkg"; then
             echo -e "\n${C_GREEN}[ OK ] Successfully installed ${pkg}${RESET}"
         else
             echo -e "\n${C_RED}[ FAILED ] Failed to install ${pkg}${RESET}"
@@ -987,7 +1051,9 @@ if [[ "$REPLACE_DM" == true ]]; then
     for dm in "${DMS[@]}"; do
         if systemctl is-enabled "$dm.service" &>/dev/null || systemctl is-active "$dm.service" &>/dev/null; then
             echo "  -> Disabling conflicting Display Manager: $dm"
-            sudo systemctl disable "$dm.service" --now 2>/dev/null || true
+            
+            # CRITICAL FIX: Removed '--now' so it doesn't instantly kill the user's GUI session
+            sudo systemctl disable "$dm.service" 2>/dev/null || true
             sudo pacman -Rns --noconfirm "$dm" > /dev/null 2>&1 || true
         fi
     done
@@ -1007,8 +1073,10 @@ CLONE_DIR="$HOME/.hyprland-dots"
 OLD_COMMIT=""
 NEW_COMMIT=""
 
-# Only treat it as a local dev repo if they are NOT inside the default clone directory
-if [ -f "$(pwd)/install.sh" ] && [ -d "$(pwd)/.config" ] && [ "$(pwd)" != "$CLONE_DIR" ]; then
+# Only treat it as a local dev repo if they are NOT inside the default clone directory.
+# Added checks to ensure we are NOT in $HOME and that a .git folder exists.
+# This prevents the script from treating the user's home directory as the source repository.
+if [ -f "$(pwd)/install.sh" ] && [ -d "$(pwd)/.config" ] && [ -d "$(pwd)/.git" ] && [ "$(pwd)" != "$CLONE_DIR" ] && [ "$(pwd)" != "$HOME" ]; then
     REPO_DIR="$(pwd)"
     echo "  -> Running from local development repository at $REPO_DIR"
     NEW_COMMIT=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)
@@ -1026,7 +1094,16 @@ else
         NEW_COMMIT=$(git -C "$CLONE_DIR" rev-parse HEAD 2>/dev/null)
     else
         OLD_COMMIT="$LAST_COMMIT"
-        git clone "$REPO_URL" "$CLONE_DIR" > /dev/null 2>&1
+        # Clone with dynamic progress bar
+        git clone --progress "$REPO_URL" "$CLONE_DIR" 2>&1 | tr '\r' '\n' | while read -r line; do
+            if [[ "$line" =~ Receiving\ objects:\ *([0-9]+)% ]]; then
+                pc="${BASH_REMATCH[1]}"
+                fill=$(printf "%*s" $((pc / 2)) "" | tr ' ' '#')
+                empty=$(printf "%*s" $((50 - (pc / 2))) "" | tr ' ' '-')
+                printf "\r\033[K  -> Downloading repo: [%s%s] %3d%%" "$fill" "$empty" "$pc"
+            fi
+        done
+        echo "" # Ensure clean new line after the progress bar
         NEW_COMMIT=$(git -C "$CLONE_DIR" rev-parse HEAD 2>/dev/null)
     fi
     REPO_DIR="$CLONE_DIR"
@@ -1045,24 +1122,55 @@ else
         rm -rf "$WALLPAPER_CLONE_DIR"
     fi
 
-    # Clone with a dynamic progress bar
-    git clone --progress "$WALLPAPER_REPO" "$WALLPAPER_CLONE_DIR" 2>&1 | tr '\r' '\n' | while read -r line; do
-        if [[ "$line" =~ Receiving\ objects:\ *([0-9]+)% ]]; then
-            pc="${BASH_REMATCH[1]}"
-            fill=$(printf "%*s" $((pc / 2)) "" | tr ' ' '#')
-            empty=$(printf "%*s" $((50 - (pc / 2))) "" | tr ' ' '-')
-            printf "\r\033[K  -> Downloading: [%s%s] %3d%%" "$fill" "$empty" "$pc"
-        fi
-    done
-    echo "" # Ensure a clean new line after the progress bar finishes
+    if [[ "$OPT_WALLPAPERS" == true ]]; then
+        # Clone with a dynamic progress bar
+        git clone --progress "$WALLPAPER_REPO" "$WALLPAPER_CLONE_DIR" 2>&1 | tr '\r' '\n' | while read -r line; do
+            if [[ "$line" =~ Receiving\ objects:\ *([0-9]+)% ]]; then
+                pc="${BASH_REMATCH[1]}"
+                fill=$(printf "%*s" $((pc / 2)) "" | tr ' ' '#')
+                empty=$(printf "%*s" $((50 - (pc / 2))) "" | tr ' ' '-')
+                printf "\r\033[K  -> Downloading: [%s%s] %3d%%" "$fill" "$empty" "$pc"
+            fi
+        done
+        echo "" # Ensure a clean new line after the progress bar finishes
 
-    if [ -d "$WALLPAPER_CLONE_DIR/images" ]; then
-        cp -r "$WALLPAPER_CLONE_DIR/images/"* "$WALLPAPER_DIR/" 2>/dev/null || true
+        if [ -d "$WALLPAPER_CLONE_DIR/images" ]; then
+            cp -r "$WALLPAPER_CLONE_DIR/images/"* "$WALLPAPER_DIR/" 2>/dev/null || true
+        else
+            cp -r "$WALLPAPER_CLONE_DIR/"* "$WALLPAPER_DIR/" 2>/dev/null || true
+        fi
+        rm -rf "$WALLPAPER_CLONE_DIR"
+        printf "  -> Full wallpaper pack installed to %-12s ${C_GREEN}[ OK ]${RESET}\n" "$WALLPAPER_DIR"
     else
-        cp -r "$WALLPAPER_CLONE_DIR/"* "$WALLPAPER_DIR/" 2>/dev/null || true
+        echo -e "  -> ${C_CYAN}Fetching 3 random wallpapers to save time...${RESET}"
+        mkdir -p "$WALLPAPER_CLONE_DIR"
+        # Use a subshell to avoid changing the main script's working directory
+        (
+            cd "$WALLPAPER_CLONE_DIR" || exit
+            git init -q
+            git remote add origin "$WALLPAPER_REPO"
+            
+            # Fetch tree only without downloading blobs (file contents)
+            git fetch --depth 1 --filter=blob:none origin HEAD -q
+            
+            # Get 3 random image paths from the remote tree
+            RANDOM_PICS=$(git ls-tree -r origin/HEAD --name-only | grep -iE '\.(jpg|jpeg|png|gif|webp)$' | shuf -n 3)
+            
+            if [ -n "$RANDOM_PICS" ]; then
+                for pic in $RANDOM_PICS; do
+                    filename=$(basename "$pic")
+                    echo -n "    -> Downloading $filename... "
+                    # This command triggers the on-demand download of just this specific file
+                    git show origin/HEAD:"$pic" > "$WALLPAPER_DIR/$filename" 2>/dev/null
+                    echo -e "${C_GREEN}[ DONE ]${RESET}"
+                done
+            else
+                echo -e "    -> ${C_RED}Could not find any images in the repository.${RESET}"
+            fi
+        )
+        rm -rf "$WALLPAPER_CLONE_DIR"
+        printf "  -> Random wallpapers installed to %-12s ${C_GREEN}[ OK ]${RESET}\n" "$WALLPAPER_DIR"
     fi
-    rm -rf "$WALLPAPER_CLONE_DIR"
-    printf "  -> Wallpapers installed to %-12s ${C_GREEN}[ OK ]${RESET}\n" "$WALLPAPER_DIR"
 fi
 
 # --- 4. Copying Dotfiles & Backups ---
@@ -1070,7 +1178,7 @@ echo -e "\n${C_CYAN}[ INFO ]${RESET} Applying Configurations & Backing Up Old On
 TARGET_CONFIG_DIR="$HOME/.config"
 BACKUP_DIR="$HOME/.config-backup-$(date +%Y%m%d_%H%M%S)"
 
-CONFIG_FOLDERS=("cava" "hypr" "kitty" "rofi" "swaync" "matugen" "zsh" "swayosd")
+CONFIG_FOLDERS=("cava" "hypr" "kitty" "rofi" "matugen" "zsh" "swayosd")
 if [ "$INSTALL_NVIM" = true ]; then CONFIG_FOLDERS+=("nvim"); fi
 
 mkdir -p "$TARGET_CONFIG_DIR" "$BACKUP_DIR"
@@ -1095,8 +1203,16 @@ elif [ "$OLD_COMMIT" == "$NEW_COMMIT" ] && [ -n "$OLD_COMMIT" ]; then
     echo -e "  -> Repository is up to date (${C_YELLOW}${NEW_COMMIT::7}${RESET}). Only applying upstream changes (None found)."
 fi
 
+SETTINGS_FILE="$TARGET_CONFIG_DIR/hypr/scripts/settings.json"
+
 if [ "$DO_FULL_INSTALL" = true ]; then
     echo "  -> Performing Full Install / Overwrite..."
+    
+    # Pre-backup settings.json specifically to guarantee it survives the copy loop overwrites
+    if [ -f "$SETTINGS_FILE" ]; then
+        cp "$SETTINGS_FILE" "$BACKUP_DIR/settings.json.bak"
+    fi
+
     for folder in "${CONFIG_FOLDERS[@]}"; do
         TARGET_PATH="$TARGET_CONFIG_DIR/$folder"
         SOURCE_PATH="$REPO_DIR/.config/$folder"
@@ -1109,6 +1225,13 @@ if [ "$DO_FULL_INSTALL" = true ]; then
             printf "  -> Copied %-31s ${C_GREEN}[ OK ]${RESET}\n" "$folder"
         fi
     done
+    
+    # Safely restore settings.json if it existed prior to the copy loop
+    if [ -f "$BACKUP_DIR/settings.json.bak" ]; then
+        mkdir -p "$(dirname "$SETTINGS_FILE")"
+        cp "$BACKUP_DIR/settings.json.bak" "$SETTINGS_FILE"
+        printf "  -> Restored existing settings.json  %-12s ${C_GREEN}[ OK ]${RESET}\n" ""
+    fi
 else
     # Partial Update Logic (Git Diff)
     CHANGED_FILES=""
@@ -1323,7 +1446,7 @@ fi
 if [ -f "$HYPR_CONF" ]; then
 
     # 0. Inject Keyboard Layout Configurations dynamically
-    echo -e "  -> Applying Keyboard configuration..."
+    echo -e "  -> Applying Keyboard configuration to hyprland.conf..."
     sed -i "s/^ *kb_layout =.*/    kb_layout = $KB_LAYOUTS/" "$HYPR_CONF"
     if [ -n "$KB_OPTIONS" ]; then
         sed -i "s/^ *kb_options =.*/    kb_options = $KB_OPTIONS/" "$HYPR_CONF"
@@ -1388,11 +1511,30 @@ else
     echo -e "${C_RED}Warning: hyprland.conf not found at $HYPR_CONF${RESET}"
 fi
 
+# -> Inject Settings and Keyboard Layouts into settings.json <-
+echo -e "  -> Syncing Settings and Keyboard languages to settings.json..."
+if [ -f "$SETTINGS_FILE" ]; then
+    tmp_json=$(mktemp)
+    # Update the existing file, ensuring 'language', 'wallpaperDir', and 'kbOptions' are set
+    jq --arg langs "$KB_LAYOUTS" --arg wpdir "$WALLPAPER_DIR" --arg kbopt "$KB_OPTIONS" \
+        '.language = $langs | .wallpaperDir = $wpdir | .kbOptions = $kbopt' "$SETTINGS_FILE" > "$tmp_json" && mv "$tmp_json" "$SETTINGS_FILE"
+else
+    mkdir -p "$(dirname "$SETTINGS_FILE")"
+    # Generate the full expected default structure for the QML guide
+    cat <<EOF > "$SETTINGS_FILE"
+{
+  "uiScale": 1.0,
+  "openGuideAtStartup": true,
+  "topbarHelpIcon": true,
+  "wallpaperDir": "$WALLPAPER_DIR",
+  "language": "$KB_LAYOUTS",
+  "kbOptions": "$KB_OPTIONS"
+}
+EOF
+fi
+
 # 4. Patch WallpaperPicker.qml dynamically
 if [ -f "$WP_QML" ]; then
-
-    # 2. Fix the focus bug: Strip absolute directory paths and quotes so tryFocus() correctly matches the base filename
-    sed -i "s|let clean = String(name);|let clean = String(name).replace(/['\"]/g, \"\"); clean = clean.substring(clean.lastIndexOf('/') + 1);|g" "$WP_QML"
 
     # 3. Inject --source-color-index 0 to Matugen commands for 4.0 compatibility
     # First, aggressively remove ANY existing instances of "--source-color-index 0" to clean up past duplicate bugs
@@ -1486,7 +1628,21 @@ printf "  -> Configuration and version state saved %-7s ${C_GREEN}[ OK ]${RESET}
 # ==============================================================================
 # Final Output
 # ==============================================================================
-echo -e "\n${BOLD}${C_MAGENTA}=== Installation Complete ===${RESET}\n"
+echo -e "\n${BOLD}${C_GREEN}"
+cat << "EOF"
+  ___ _  _ ___ _____ _   _    _      _ _____ ___ ___  _  _    ___ ___  __  __ ___ _    ___ _____ ___ 
+ |_ _| \| / __|_   _/_\ | |  | |    /_\_   _|_ _/ _ \| \| |  / __/ _ \|  \/  | _ \ |  | __|_   _| __|
+  | || .` \__ \ | |/ _ \| |__| |__ / _ \| |  | | (_) | .` | | (_| (_) | |\/| |  _/ |__| _|  | | | _| 
+ |___|_|\_|___/ |_/_/ \_\____|____/_/ \_\_| |___\___/|_|\_|  \___\___/|_|  |_|_| |____|___| |_| |___|
+                                                                                                     
+EOF
+echo -e "${RESET}\n"
+
+echo -e "${BOLD}${C_MAGENTA}=================================================================${RESET}"
+echo -e "${BOLD}${C_YELLOW} Support the Creator:${RESET}"
+echo -e " If you enjoy this project, consider buying me a coffee!"
+echo -e " ${BOLD}${C_CYAN}Ko-fi:${RESET} https://ko-fi.com/ilyamiro"
+echo -e "${BOLD}${C_MAGENTA}=================================================================${RESET}\n"
 
 if [ ${#FAILED_PKGS[@]} -ne 0 ]; then
     echo -e "${BOLD}${C_RED}The following packages were NOT installed. Try building them yourself:${RESET}"
@@ -1498,3 +1654,6 @@ fi
 
 echo -e "Old configurations backed up to: ${C_CYAN}$BACKUP_DIR${RESET}"
 echo -e "Please log out and log back in, or restart Hyprland to apply all changes."
+
+# Send completion telemetry
+send_telemetry "done"

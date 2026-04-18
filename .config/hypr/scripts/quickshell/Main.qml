@@ -4,7 +4,10 @@ import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import Quickshell.Services.Notifications
 import "WindowRegistry.js" as Registry
+
+import "notifications" as Notifs
 
 PanelWindow {
     id: masterWindow
@@ -28,7 +31,7 @@ PanelWindow {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: 65 // Safely covers your TopBar height + margins
+        height: 65 
     }
 
     MouseArea {
@@ -37,32 +40,136 @@ PanelWindow {
         onClicked: switchWidget("hidden", "")
     }
 
-    // Initialize state on boot
     Component.onCompleted: {
-        Quickshell.execDetached(["bash", "-c", "echo '" + currentActive + "' > /tmp/qs_active_widget"]);
+        // State is now strictly in memory; no need to write to /tmp on startup.
     }
 
-    property string currentActive: "hidden" 
+    property string currentActive: "hidden"
+
+    onCurrentActiveChanged: {
+        // Broadcast active state so TopBar knows when to morph
+        Quickshell.execDetached(["bash", "-c", "echo '" + currentActive + "' > /tmp/qs_current_widget"]);
+    }
+
     property bool isVisible: false
     property string activeArg: ""
     property bool disableMorph: false 
-    property bool isWallpaperTransition: false 
     property int morphDuration: 500
+    property int exitDuration: 300 // Controls how fast the outgoing widget disappears
 
     property real animW: 1
     property real animH: 1
     property real animX: 0
     property real animY: 0
     
-    // NEW: Explicit targets for the inner content wrapper so widgets can override them dynamically
     property real targetW: 1
     property real targetH: 1
 
-    function getLayout(name) {
-        return Registry.getLayout(name, 0, 0, Screen.width, Screen.height);
+    property real globalUiScale: 1.0
+
+    // =========================================================
+    // --- DAEMON: NOTIFICATION HANDLING
+    // =========================================================
+    // 1. Permanent History (For the Notification Center)
+    ListModel {
+        id: globalNotificationHistory
     }
 
-    // Automatically recalculates position and scale if the OS resolution changes
+    // 2. Transient Popups (For the OSD)
+    ListModel {
+        id: activePopupsModel
+    }
+
+    property int _popupCounter: 0
+
+    function removePopup(uid) {
+        for (let i = 0; i < activePopupsModel.count; i++) {
+            if (activePopupsModel.get(i).uid === uid) {
+                activePopupsModel.remove(i);
+                break;
+            }
+        }
+    }
+
+    NotificationServer {
+        id: globalNotificationServer
+        bodySupported: true
+        actionsSupported: true
+        imageSupported: true
+
+        onNotification: (n) => {
+            console.log("Saving to history:", n.appName, "-", n.summary);
+            
+            let notifData = {
+                "appName": n.appName !== "" ? n.appName : "System",
+                "summary": n.summary !== "" ? n.summary : "No Title",
+                "body": n.body !== "" ? n.body : "",
+                "iconPath": n.appIcon !== "" ? n.appIcon : "", // <-- ADDED: Save the -i parameter path
+                "notif": n
+            };
+
+            // A. Insert into the permanent center
+            globalNotificationHistory.insert(0, notifData);
+
+            // B. Append to the on-screen popups
+            masterWindow._popupCounter++;
+            let popupData = Object.assign({ "uid": masterWindow._popupCounter }, notifData);
+            activePopupsModel.append(popupData);
+        }
+    }    
+    property var notifModel: globalNotificationHistory
+    
+    // --- INSTANTIATE THE POPUP OVERLAY ---
+    Notifs.NotificationPopups {
+        id: osdPopups
+        popupModel: activePopupsModel
+        uiScale: masterWindow.globalUiScale
+    }
+    // =========================================================
+
+    onGlobalUiScaleChanged: {
+        handleNativeScreenChange();
+    }
+
+    Process {
+        id: settingsReader
+        command: ["bash", "-c", "cat ~/.config/hypr/settings.json 2>/dev/null || echo '{}'"]
+        running: true 
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    if (this.text && this.text.trim().length > 0 && this.text.trim() !== "{}") {
+                        let parsed = JSON.parse(this.text);
+                        if (parsed.uiScale !== undefined && masterWindow.globalUiScale !== parsed.uiScale) {
+                            masterWindow.globalUiScale = parsed.uiScale;
+                        }
+                    }
+                } catch (e) {
+                    console.log("Error parsing settings.json in main.qml:", e);
+                }
+            }
+        }
+    }
+
+    Process {
+        id: settingsWatcher
+        command: ["bash", "-c", "while [ ! -f ~/.config/hypr/settings.json ]; do sleep 1; done; inotifywait -qq -e modify,close_write ~/.config/hypr/settings.json"]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                settingsReader.running = false;
+                settingsReader.running = true;
+                
+                settingsWatcher.running = false;
+                settingsWatcher.running = true;
+            }
+        }
+    }
+
+    function getLayout(name) {
+        return Registry.getLayout(name, 0, 0, Screen.width, Screen.height, masterWindow.globalUiScale);
+    }
+
     Connections {
         target: Screen
         function onWidthChanged() { handleNativeScreenChange(); }
@@ -74,8 +181,6 @@ PanelWindow {
         
         let t = getLayout(masterWindow.currentActive);
         if (t) {
-            // Update the animation targets. The Behaviors below will 
-            // glide the widget to the new layout perfectly.
             masterWindow.animX = t.rx;
             masterWindow.animY = t.ry;
             masterWindow.animW = t.w;
@@ -84,27 +189,27 @@ PanelWindow {
             masterWindow.targetH = t.h;
         }
     }
-    // ---------------------------------------
 
     onIsVisibleChanged: {
         if (isVisible) masterWindow.requestActivate();
     }
 
-    // --- THE WIDGET CONTAINER ---
     Item {
         x: masterWindow.animX
         y: masterWindow.animY
         width: masterWindow.animW
         height: masterWindow.animH
         clip: true 
+        layer.enabled: true 
 
-        Behavior on x { enabled: !masterWindow.disableMorph; NumberAnimation { duration: masterWindow.morphDuration; easing.type: Easing.InOutCubic } }
-        Behavior on y { enabled: !masterWindow.disableMorph; NumberAnimation { duration: masterWindow.morphDuration; easing.type: Easing.InOutCubic } }
-        Behavior on width { enabled: !masterWindow.disableMorph; NumberAnimation { duration: masterWindow.morphDuration; easing.type: Easing.InOutCubic } }
-        Behavior on height { enabled: !masterWindow.disableMorph; NumberAnimation { duration: masterWindow.morphDuration; easing.type: Easing.InOutCubic } }
+        // Smoother easing type: OutExpo makes animations feel snappy yet perfectly fluid
+        Behavior on x { enabled: !masterWindow.disableMorph; NumberAnimation { duration: masterWindow.morphDuration; easing.type: Easing.OutExpo } }
+        Behavior on y { enabled: !masterWindow.disableMorph; NumberAnimation { duration: masterWindow.morphDuration; easing.type: Easing.OutExpo } }
+        Behavior on width { enabled: !masterWindow.disableMorph; NumberAnimation { duration: masterWindow.morphDuration; easing.type: Easing.OutExpo } }
+        Behavior on height { enabled: !masterWindow.disableMorph; NumberAnimation { duration: masterWindow.morphDuration; easing.type: Easing.OutExpo } }
 
         opacity: masterWindow.isVisible ? 1.0 : 0.0
-        Behavior on opacity { NumberAnimation { duration: masterWindow.isWallpaperTransition ? 150 : (masterWindow.morphDuration === 500 ? 300 : 200); easing.type: Easing.InOutSine } }
+        Behavior on opacity { NumberAnimation { duration: masterWindow.morphDuration === 500 ? 300 : 200; easing.type: Easing.InOutSine } }
 
         MouseArea {
             anchors.fill: parent
@@ -112,7 +217,6 @@ PanelWindow {
 
         Item {
             anchors.centerIn: parent
-            // CHANGE: Now uses the overrideable properties instead of strict registry bindings
             width: masterWindow.targetW
             height: masterWindow.targetH
 
@@ -138,8 +242,9 @@ PanelWindow {
                 }
                 replaceExit: Transition {
                     ParallelAnimation {
-                        NumberAnimation { property: "opacity"; from: 1.0; to: 0.0; duration: 300; easing.type: Easing.InExpo }
-                        NumberAnimation { property: "scale"; from: 1.0; to: 1.02; duration: 300; easing.type: Easing.InExpo }
+                        // Uses the dynamically set exitDuration
+                        NumberAnimation { property: "opacity"; from: 1.0; to: 0.0; duration: masterWindow.exitDuration; easing.type: Easing.InExpo }
+                        NumberAnimation { property: "scale"; from: 1.0; to: 1.02; duration: masterWindow.exitDuration; easing.type: Easing.InExpo }
                     }
                 }
             }
@@ -147,21 +252,15 @@ PanelWindow {
     }
 
     function switchWidget(newWidget, arg) {
-        // FIX 1: Immediately update the system state file so the bash manager 
-        // doesn't read stale data during the morph animations.
-        Quickshell.execDetached(["bash", "-c", "echo '" + newWidget + "' > /tmp/qs_active_widget"]);
+        // REMOVED: Quickshell.execDetached file writing. State is strictly in memory now.
 
         prepTimer.stop();
-        teleportFadeOutTimer.stop();
-        teleportFadeInTimer.stop();
         delayedClear.stop();
-
-        let involvesWallpaper = (newWidget === "wallpaper" || currentActive === "wallpaper");
-        masterWindow.isWallpaperTransition = involvesWallpaper;
 
         if (newWidget === "hidden") {
             if (currentActive !== "hidden") {
                 masterWindow.morphDuration = 250; 
+                masterWindow.exitDuration = 250;
                 masterWindow.disableMorph = false;
                 
                 masterWindow.animW = 1;
@@ -173,6 +272,7 @@ PanelWindow {
         } else {
             if (currentActive === "hidden") {
                 masterWindow.morphDuration = 250;
+                masterWindow.exitDuration = 300;
                 masterWindow.disableMorph = false;
                 
                 let t = getLayout(newWidget);
@@ -186,17 +286,14 @@ PanelWindow {
                 prepTimer.start();
                 
             } else {
+                // Morphing directly between widgets (including wallpaper)
                 masterWindow.morphDuration = 500;
-                if (involvesWallpaper) {
-                    masterWindow.disableMorph = true;
-                    masterWindow.isVisible = false; 
-                    teleportFadeOutTimer.newWidget = newWidget;
-                    teleportFadeOutTimer.newArg = arg;
-                    teleportFadeOutTimer.start();
-                } else {
-                    masterWindow.disableMorph = false;
-                    executeSwitch(newWidget, arg, false);
-                }
+                masterWindow.disableMorph = false;
+                
+                // If transitioning to wallpaper, make the previous widget disappear significantly faster
+                masterWindow.exitDuration = (newWidget === "wallpaper") ? 100 : 300;
+                
+                executeSwitch(newWidget, arg, false);
             }
         }
     }
@@ -207,50 +304,6 @@ PanelWindow {
         property string newWidget: ""
         property string newArg: ""
         onTriggered: executeSwitch(newWidget, newArg, false)
-    }
-
-    Timer {
-        id: teleportFadeOutTimer
-        interval: 150 
-        property string newWidget: ""
-        property string newArg: ""
-        onTriggered: {
-            let t = getLayout(newWidget);
-
-            masterWindow.currentActive = newWidget;
-            masterWindow.activeArg = newArg;
-
-            masterWindow.animX = t.rx;
-            masterWindow.animY = t.ry;
-            masterWindow.animW = t.w;
-            masterWindow.animH = t.h;
-            masterWindow.targetW = t.w;
-            masterWindow.targetH = t.h;
-
-            let props = newWidget === "wallpaper" ? { "widgetArg": newArg } : {};
-            widgetStack.replace(t.comp, props, StackView.Immediate);
-
-            teleportFadeInTimer.newWidget = newWidget;
-            teleportFadeInTimer.newArg = newArg;
-            teleportFadeInTimer.start();
-        }
-    }
-
-    Timer {
-        id: teleportFadeInTimer
-        interval: 50 
-        property string newWidget: ""
-        property string newArg: ""
-        onTriggered: {
-            masterWindow.isVisible = true; 
-            if (newWidget !== "wallpaper") resetMorphTimer.start();
-        }
-    }
-
-    Timer {
-        id: resetMorphTimer
-        interval: masterWindow.morphDuration 
-        onTriggered: masterWindow.disableMorph = false
     }
 
     function executeSwitch(newWidget, arg, immediate) {
@@ -266,6 +319,7 @@ PanelWindow {
         masterWindow.targetH = t.h;
         
         let props = newWidget === "wallpaper" ? { "widgetArg": arg } : {};
+        props["notifModel"] = masterWindow.notifModel;
 
         if (immediate) {
             widgetStack.replace(t.comp, props, StackView.Immediate);
@@ -276,38 +330,75 @@ PanelWindow {
         masterWindow.isVisible = true;
     }
 
-    Timer {
-        interval: 50; running: true; repeat: true
-        onTriggered: { if (!ipcPoller.running) ipcPoller.running = true; }
-    }
-
+    // =========================================================
+    // --- IPC: EVENT-DRIVEN WATCHER
+    // =========================================================
     Process {
-        id: ipcPoller
-        // FIX 2: Use `mv` to make the file read/delete atomic. This prevents 
-        // wiping out rapid subsequent commands that happen during execution.
-        command: ["bash", "-c", "if [ -f /tmp/qs_widget_state ]; then mv /tmp/qs_widget_state /tmp/qs_widget_state_read 2>/dev/null && cat /tmp/qs_widget_state_read && rm /tmp/qs_widget_state_read; fi"]
+        id: ipcWatcher
+        command: ["bash", "-c",
+            "touch /tmp/qs_widget_state; " +
+            "inotifywait -qq -e close_write /tmp/qs_widget_state 2>/dev/null; " +
+            "cat /tmp/qs_widget_state"
+        ]
+        running: true
         stdout: StdioCollector {
             onStreamFinished: {
                 let rawCmd = this.text.trim();
-                if (rawCmd === "") return;
 
-                let parts = rawCmd.split(":");
-                let cmd = parts[0];
-                let arg = parts.length > 1 ? parts[1] : "";
+                if (rawCmd !== "") {
+                    let parts = rawCmd.split(":");
+                    let cmd = parts[0];
 
-                if (cmd === "close") {
-                    switchWidget("hidden", "");
-                } else if (getLayout(cmd)) {
-                    delayedClear.stop();
-                    switchWidget(cmd, arg);
+                    if (cmd === "close") {
+                        switchWidget("hidden", "");
+                    } else if (cmd === "toggle" || cmd === "open") {
+                        let targetWidget = parts.length > 1 ? parts[1] : "";
+                        let arg = parts.length > 2 ? parts.slice(2).join(":") : "";
+
+                        delayedClear.stop();
+                        
+                        if (targetWidget === masterWindow.currentActive) {
+                            let currentItem = widgetStack.currentItem;
+                            
+                            // 1. If it's a tabbed widget and user requests a DIFFERENT tab, switch natively
+                            if (arg !== "" && currentItem && currentItem.activeMode !== undefined && currentItem.activeMode !== arg) {
+                                currentItem.activeMode = arg;
+                            } 
+                            // 2. If it's a toggle command and the tab matches (or no subtarget given), close it
+                            else if (cmd === "toggle") {
+                                switchWidget("hidden", "");
+                            }
+                            // 3. If "open" and already on the correct tab, do nothing (stays open).
+                            
+                        } else if (getLayout(targetWidget)) {
+                            switchWidget(targetWidget, arg);
+                        }
+                    } else if (getLayout(cmd)) { 
+                        // Fallback for old formatting
+                        let arg = parts.length > 1 ? parts.slice(1).join(":") : "";
+                        delayedClear.stop();
+                        
+                        if (cmd === masterWindow.currentActive) {
+                            let currentItem = widgetStack.currentItem;
+                            if (arg !== "" && currentItem && currentItem.activeMode !== undefined && currentItem.activeMode !== arg) {
+                                currentItem.activeMode = arg;
+                            } else {
+                                switchWidget("hidden", "");
+                            }
+                        } else {
+                            switchWidget(cmd, arg);
+                        }
+                    }
                 }
+
+                ipcWatcher.running = false;
+                ipcWatcher.running = true;
             }
         }
-    }
-
+    }    
     Timer {
         id: delayedClear
-        interval: masterWindow.isWallpaperTransition ? 150 : masterWindow.morphDuration 
+        interval: masterWindow.morphDuration 
         onTriggered: {
             masterWindow.currentActive = "hidden";
             widgetStack.clear();

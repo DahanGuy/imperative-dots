@@ -25,7 +25,7 @@ SUBTARGET="$3"
 # -----------------------------------------------------------------------------
 if [[ "$ACTION" =~ ^[0-9]+$ ]]; then
     WORKSPACE_NUM="$ACTION"
-    echo "close" > "$IPC_FILE" # Tell QML to hide the widget natively
+    echo "close" > "$IPC_FILE"
     
     CMD="workspace $WORKSPACE_NUM"
     [[ "$2" == "move" ]] && CMD="movetoworkspace $WORKSPACE_NUM"
@@ -38,7 +38,16 @@ fi
 # -----------------------------------------------------------------------------
 handle_wallpaper_prep() {
     mkdir -p "$THUMB_DIR"
+    
+    # The lock is now inside the subshell. It stops duplicate thumbnailers,
+    # but never blocks the main script from opening/closing the widget instantly.
     (
+        LOCKFILE="/tmp/qs_manager_wallpaper.lock"
+        exec 9> "$LOCKFILE"
+        if ! flock -n 9; then
+            exit 0
+        fi
+
         for thumb in "$THUMB_DIR"/*; do
             [ -e "$thumb" ] || continue
             filename=$(basename "$thumb")
@@ -80,12 +89,12 @@ handle_wallpaper_prep() {
 
     if pgrep -a "mpvpaper" > /dev/null; then
         CURRENT_SRC=$(pgrep -a mpvpaper | grep -o "$SRC_DIR/[^' ]*" | head -n1)
-        CURRENT_SRC=$(basename "$CURRENT_SRC")
+        [ -n "$CURRENT_SRC" ] && CURRENT_SRC=$(basename "$CURRENT_SRC")
     fi
 
     if [ -z "$CURRENT_SRC" ] && command -v swww >/dev/null; then
         CURRENT_SRC=$(swww query 2>/dev/null | grep -o "$SRC_DIR/[^ ]*" | head -n1)
-        CURRENT_SRC=$(basename "$CURRENT_SRC")
+        [ -n "$CURRENT_SRC" ] && CURRENT_SRC=$(basename "$CURRENT_SRC")
     fi
 
     if [ -n "$CURRENT_SRC" ]; then
@@ -124,7 +133,7 @@ if ! pgrep -f "quickshell.*TopBar\.qml" >/dev/null; then
 fi
 
 # -----------------------------------------------------------------------------
-# IPC ROUTING (No hyprctl focus/move commands needed!)
+# IPC ROUTING
 # -----------------------------------------------------------------------------
 if [[ "$ACTION" == "close" ]]; then
     echo "close" > "$IPC_FILE"
@@ -139,39 +148,20 @@ if [[ "$ACTION" == "close" ]]; then
 fi
 
 if [[ "$ACTION" == "open" || "$ACTION" == "toggle" ]]; then
-    ACTIVE_WIDGET=$(cat /tmp/qs_active_widget 2>/dev/null)
     CURRENT_MODE=$(cat "$NETWORK_MODE_FILE" 2>/dev/null)
 
     if [[ "$TARGET" == "network" ]]; then
-        if [[ "$ACTION" == "toggle" && "$ACTIVE_WIDGET" == "network" ]]; then
-            if [[ -n "$SUBTARGET" ]]; then
-                if [[ "$CURRENT_MODE" == "$SUBTARGET" ]]; then
-                    echo "close" > "$IPC_FILE"
-                else
-                    echo "$SUBTARGET" > "$NETWORK_MODE_FILE"
-                    echo "$TARGET" > "$IPC_FILE"
-                fi
-            else
-                echo "close" > "$IPC_FILE"
-            fi
-        else
-            handle_network_prep
-            [[ -n "$SUBTARGET" ]] && echo "$SUBTARGET" > "$NETWORK_MODE_FILE"
-            echo "$TARGET" > "$IPC_FILE"
-        fi
-        exit 0
-    fi
-
-    if [[ "$ACTION" == "toggle" && "$ACTIVE_WIDGET" == "$TARGET" ]]; then
-        echo "close" > "$IPC_FILE"
+        handle_network_prep
+        [[ -n "$SUBTARGET" ]] && echo "$SUBTARGET" > "$NETWORK_MODE_FILE"
+        echo "$ACTION:$TARGET:$SUBTARGET" > "$IPC_FILE"
         exit 0
     fi
 
     if [[ "$TARGET" == "wallpaper" ]]; then
         handle_wallpaper_prep
-        echo "$TARGET:$WALLPAPER_THUMB" > "$IPC_FILE"
+        echo "$ACTION:$TARGET:$WALLPAPER_THUMB" > "$IPC_FILE"
     else
-        echo "$TARGET" > "$IPC_FILE"
+        echo "$ACTION:$TARGET:$SUBTARGET" > "$IPC_FILE"
     fi
     exit 0
 fi
